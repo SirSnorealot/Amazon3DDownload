@@ -2,7 +2,7 @@
 
 Small Python script for downloading 3D furniture models from Amazon products that expose **View in 3D** in the Amazon mobile app.
 
-It can optionally convert the downloaded model to **OBJ** for use in programs like [Sweet Home 3D](https://www.sweethome3d.com/).
+It can optionally convert the downloaded model to **OBJ** for use in other 3D software.
 
 ## Install
 
@@ -24,7 +24,7 @@ Or an ASIN:
 python amazon3d.py B0CMZP2MNF
 ```
 
-## Convert for Sweet Home 3D
+## Convert to OBJ
 
 ```bash
 python amazon3d.py "https://a.co/d/041LnFSr" --obj
@@ -42,12 +42,6 @@ downloads/
         ├── material.mtl
         └── texture files
 ```
-
-Then open Sweet Home 3D and choose:
-
-**Furniture → Import furniture**
-
-Select the `.obj` file.
 
 ## Why trimesh?
 

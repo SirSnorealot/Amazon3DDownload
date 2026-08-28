@@ -3,7 +3,7 @@
 Amazon3DDownload
 
 Downloads Amazon "View in 3D" model packages and can convert them to OBJ
-for Sweet Home 3D.
+for use in other 3D software.
 
 Initial version written with assistance from OpenAI ChatGPT.
 """
@@ -188,7 +188,7 @@ def main():
     parser.add_argument(
         "--obj",
         action="store_true",
-        help="Also convert the downloaded model to OBJ for Sweet Home 3D",
+        help="Also convert the downloaded model to OBJ",
     )
     parser.add_argument(
         "-o",
@@ -254,7 +254,6 @@ def main():
 
             obj = convert_to_obj(gltf, product_dir / "obj")
             print(f"OBJ ready: {obj}")
-            print("Sweet Home 3D: Furniture > Import furniture")
 
         return 0
 
