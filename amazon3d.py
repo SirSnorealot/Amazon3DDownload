@@ -2,8 +2,8 @@
 """
 Amazon3DDownload
 
-Download Amazon 3D model packages for products that expose a mobile-app
-"View in 3D" experience.
+Downloads Amazon "View in 3D" model packages and can convert them to OBJ
+for Sweet Home 3D.
 
 Initial version written with assistance from OpenAI ChatGPT.
 """
@@ -13,7 +13,9 @@ import html
 import json
 import re
 import sys
+import tarfile
 import urllib.parse
+import zipfile
 from pathlib import Path
 
 import requests
@@ -22,8 +24,8 @@ import requests
 APP_VERSION = "32.13.0.100"
 
 
-def make_app_context():
-    obj = {
+def app_context():
+    data = {
         "an": "Amazon.com",
         "av": APP_VERSION,
         "xv": "1.15.0",
@@ -57,183 +59,206 @@ def make_app_context():
     }
 
     return "1.8%20" + urllib.parse.quote(
-        json.dumps(obj, separators=(",", ":")),
-        safe=""
+        json.dumps(data, separators=(",", ":")),
+        safe="",
     )
 
 
 def resolve_asin(value, session):
     value = value.strip()
 
-    # Direct ASIN
     if re.fullmatch(r"[A-Z0-9]{10}", value, re.I):
         return value.upper()
 
-    # Amazon URL / a.co short URL
-    if not re.match(r"^https?://", value, re.I):
-        raise ValueError("Input must be an Amazon URL or a 10-character ASIN.")
+    if not value.lower().startswith(("http://", "https://")):
+        raise ValueError("Give an Amazon URL, a.co URL, or 10-character ASIN.")
 
     r = session.get(value, allow_redirects=True, timeout=30)
     r.raise_for_status()
 
-    candidates = [
+    patterns = [
         r"/dp/([A-Z0-9]{10})",
         r"/gp/product/([A-Z0-9]{10})",
-        r"/product/([A-Z0-9]{10})",
         r"[?&]asin=([A-Z0-9]{10})",
     ]
 
-    for pattern in candidates:
-        m = re.search(pattern, r.url, re.I)
-        if m:
-            return m.group(1).upper()
+    for source in (r.url, r.text):
+        for pattern in patterns:
+            m = re.search(pattern, source, re.I)
+            if m:
+                return m.group(1).upper()
 
-    for pattern in candidates:
-        m = re.search(pattern, r.text, re.I)
-        if m:
-            return m.group(1).upper()
-
-    raise ValueError("Could not determine ASIN from the supplied URL.")
+    raise ValueError("Could not find an ASIN in that link.")
 
 
-def normalize_amazon_html(text):
+def normalize(text):
     for _ in range(3):
         text = html.unescape(text)
 
     return (
-        text
-        .replace("\\/", "/")
+        text.replace("\\/", "/")
         .replace("\\u0026", "&")
         .replace("\\u003d", "=")
         .replace("\\u002F", "/")
-        .replace("\\u002b", "+")
         .replace("\\u002B", "+")
+        .replace("\\u002b", "+")
         .replace("\\&quot;", '"')
     )
 
 
-def find_3d_asset(text, asin):
-    text = normalize_amazon_html(text)
+def find_asset(page, asin):
+    page = normalize(page)
 
-    # Best signal: Amazon mediaDetails entry for a 3D package.
-    pattern = re.compile(
-        r'"variant"\s*:\s*"3D_unencrypted".{0,800}?'
-        r'"physicalId"\s*:\s*"([^"]+)".{0,400}?'
+    # Preferred source: Amazon's 3D media metadata.
+    m = re.search(
+        r'"variant"\s*:\s*"3D_unencrypted".{0,1000}?'
+        r'"physicalId"\s*:\s*"([^"]+)".{0,500}?'
         r'"extension"\s*:\s*"([^"]+)"',
+        page,
         re.I | re.S,
     )
-
-    m = pattern.search(text)
     if m:
-        return {
-            "asin": asin,
-            "physical_id": m.group(1),
-            "extension": m.group(2),
-        }
+        return m.group(1), m.group(2)
 
-    # Fallback: parse the /view-3d link.
-    m = re.search(r'/view-3d\?[^"\'<>\s]+', text, re.I)
+    # Fallback: /view-3d link.
+    m = re.search(r'/view-3d\?[^"\'<>\s]+', page, re.I)
     if m:
-        url = html.unescape(m.group(0))
         params = urllib.parse.parse_qs(
-            urllib.parse.urlparse("https://www.amazon.com" + url).query
+            urllib.parse.urlparse(
+                "https://www.amazon.com" + html.unescape(m.group(0))
+            ).query
         )
-
         physical_id = params.get("physicalId", [None])[0]
         extension = params.get("extension", ["zip"])[0]
-
         if physical_id:
-            return {
-                "asin": asin,
-                "physical_id": physical_id,
-                "extension": extension,
-            }
+            return physical_id, extension
 
     return None
 
 
-def download_model(value, output_dir):
-    session = requests.Session()
+def extract_package(package, destination):
+    destination.mkdir(parents=True, exist_ok=True)
 
-    asin = resolve_asin(value, session)
-    print(f"ASIN: {asin}")
+    with zipfile.ZipFile(package) as z:
+        z.extractall(destination)
 
-    headers = {
-        "User-Agent": f"Amazon.com/{APP_VERSION} (Android/14/Pixel 8 Pro)",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+    # Amazon's package commonly stores the actual glTF files in metadata.tar.
+    for tar_path in destination.rglob("*.tar"):
+        tar_dir = tar_path.parent / tar_path.stem
+        tar_dir.mkdir(exist_ok=True)
+        with tarfile.open(tar_path) as t:
+            t.extractall(tar_dir)
 
-    cookies = {
-        "amzn-app-ctxt": make_app_context(),
-    }
+    models = list(destination.rglob("*.gltf"))
+    if not models:
+        raise ValueError("Downloaded package did not contain a .gltf model.")
 
-    product_url = f"https://www.amazon.com/dp/{asin}"
+    return models[0]
 
-    print("Checking Amazon for 3D asset...")
-    r = session.get(
-        product_url,
-        headers=headers,
-        cookies=cookies,
-        timeout=30,
-    )
-    r.raise_for_status()
 
-    asset = find_3d_asset(r.text, asin)
+def convert_to_obj(gltf_path, obj_dir):
+    try:
+        import trimesh
+    except ImportError:
+        raise ValueError(
+            "OBJ conversion needs trimesh. Run: pip install -r requirements.txt"
+        )
 
-    if not asset:
-        print("No downloadable 3D asset found for this product.")
-        return 1
+    obj_dir.mkdir(parents=True, exist_ok=True)
 
-    physical_id = asset["physical_id"]
-    extension = asset["extension"]
+    print("Loading glTF...")
+    scene = trimesh.load(gltf_path, force="scene")
 
-    asset_url = (
-        f"https://m.media-amazon.com/images/I/"
-        f"{physical_id}.{extension}"
-    )
+    obj_path = obj_dir / (gltf_path.stem + ".obj")
 
-    print(f"physicalId: {physical_id}")
-    print(f"Asset: {asset_url}")
+    print("Exporting OBJ...")
+    scene.export(obj_path)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"{asin}_{physical_id}.{extension}"
+    if not obj_path.exists():
+        raise ValueError("OBJ export failed.")
 
-    print(f"Downloading to: {output_file}")
-
-    with session.get(asset_url, stream=True, timeout=60) as resp:
-        resp.raise_for_status()
-        with output_file.open("wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-
-    print("Done.")
-    return 0
+    return obj_path
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download Amazon 3D model packages from an Amazon URL or ASIN."
+        description="Download Amazon View-in-3D furniture models."
     )
+    parser.add_argument("product", help="Amazon URL, a.co URL, or ASIN")
     parser.add_argument(
-        "product",
-        help="Amazon product URL, a.co short URL, or ASIN"
+        "--obj",
+        action="store_true",
+        help="Also convert the downloaded model to OBJ for Sweet Home 3D",
     )
     parser.add_argument(
         "-o",
         "--output",
         default="downloads",
-        help="Output directory (default: downloads)"
+        help="Output directory (default: downloads)",
     )
-
     args = parser.parse_args()
 
     try:
-        return download_model(args.product, Path(args.output))
-    except requests.RequestException as e:
-        print(f"Network error: {e}", file=sys.stderr)
-        return 1
-    except ValueError as e:
+        session = requests.Session()
+        asin = resolve_asin(args.product, session)
+
+        print(f"ASIN: {asin}")
+
+        headers = {
+            "User-Agent": f"Amazon.com/{APP_VERSION} (Android/14/Pixel 8 Pro)",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        cookies = {"amzn-app-ctxt": app_context()}
+
+        print("Looking for Amazon 3D model...")
+        page = session.get(
+            f"https://www.amazon.com/dp/{asin}",
+            headers=headers,
+            cookies=cookies,
+            timeout=30,
+        )
+        page.raise_for_status()
+
+        asset = find_asset(page.text, asin)
+        if not asset:
+            print("No 3D model found for this product.")
+            return 1
+
+        physical_id, extension = asset
+        asset_url = (
+            f"https://m.media-amazon.com/images/I/"
+            f"{physical_id}.{extension}"
+        )
+
+        print(f"physicalId: {physical_id}")
+        print(f"Downloading: {asset_url}")
+
+        product_dir = Path(args.output) / asin
+        product_dir.mkdir(parents=True, exist_ok=True)
+
+        package = product_dir / f"{physical_id}.{extension}"
+
+        with session.get(asset_url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            with package.open("wb") as f:
+                for chunk in r.iter_content(1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+        print(f"Saved: {package}")
+
+        if args.obj:
+            print("Extracting model...")
+            gltf = extract_package(package, product_dir / "extracted")
+            print(f"Found: {gltf}")
+
+            obj = convert_to_obj(gltf, product_dir / "obj")
+            print(f"OBJ ready: {obj}")
+            print("Sweet Home 3D: Furniture > Import furniture")
+
+        return 0
+
+    except (requests.RequestException, ValueError, OSError, zipfile.BadZipFile) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 

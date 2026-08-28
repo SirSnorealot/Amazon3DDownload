@@ -1,74 +1,70 @@
 # Amazon3DDownload
 
-A small Python script that downloads Amazon 3D model packages for products that expose Amazon's mobile-app **View in 3D** feature.
+Small Python script for downloading 3D furniture models from Amazon products that expose **View in 3D** in the Amazon mobile app.
 
-The script accepts an Amazon product URL, `a.co` short link, or ASIN.
+It can optionally convert the downloaded model to **OBJ** for use in programs like [Sweet Home 3D](https://www.sweethome3d.com/).
 
 ## Install
 
 ```bash
-git clone https://github.com/SirSnorealot/Amazon3DDownload.git
-cd Amazon3DDownload
 pip install -r requirements.txt
 ```
 
-## Usage
+## Download
+
+Use an Amazon link:
 
 ```bash
 python amazon3d.py "https://a.co/d/041LnFSr"
 ```
 
-Or with an ASIN:
+Or an ASIN:
 
 ```bash
 python amazon3d.py B0CMZP2MNF
 ```
 
-Choose a different output folder:
+## Convert for Sweet Home 3D
 
 ```bash
-python amazon3d.py B0CMZP2MNF -o models
+python amazon3d.py "https://a.co/d/041LnFSr" --obj
 ```
 
-Downloaded files are saved to `downloads/` by default.
-
-## How it works
-
-Amazon exposes 3D metadata to its mobile-app product experience. For supported products, the response can contain a `3D_unencrypted` media entry with a `physicalId` and file extension.
-
-The script:
-
-1. Resolves the product ASIN.
-2. Requests the Amazon product page using mobile-app context metadata.
-3. Finds the 3D asset `physicalId`.
-4. Downloads the model package from Amazon's media CDN.
-
-For example:
+Output is placed under:
 
 ```text
-ASIN: B0CMZP2MNF
-physicalId: 91tIB8dOoML
-extension: zip
+downloads/
+└── B0CMZP2MNF/
+    ├── 91tIB8dOoML.zip
+    ├── extracted/
+    └── obj/
+        ├── B0CMZP2MNF.obj
+        ├── material.mtl
+        └── texture files
 ```
 
-corresponds to a package like:
+Then open Sweet Home 3D and choose:
 
-```text
-https://m.media-amazon.com/images/I/91tIB8dOoML.zip
-```
+**Furniture → Import furniture**
 
-The ZIP may contain a glTF model, binary geometry, textures, and Amazon-specific scene metadata.
+Select the `.obj` file.
+
+## Why trimesh?
+
+Some Amazon models use `KHR_draco_mesh_compression` (Draco-compressed glTF geometry). The OBJ conversion uses `trimesh` rather than a hand-written glTF parser so those models can be decoded and exported correctly.
 
 ## Notes
 
-Amazon can change this behavior at any time, so the script may stop working without warning.
+Amazon may change this undocumented behavior at any time.
 
-Only download and use models where you have the right to do so. Product models may be copyrighted by Amazon, the seller, manufacturer, or another rights holder. This project is not affiliated with Amazon.
+Only download/use models where you have the right to do so. The 3D assets may be copyrighted by Amazon, the seller, manufacturer, or another rights holder.
+
+This project is not affiliated with Amazon.
 
 ## AI disclosure
 
-The initial version of this project and its documentation were written with assistance from **OpenAI ChatGPT**.
+The initial implementation and documentation were written with assistance from **OpenAI ChatGPT**.
 
 ## License
 
-MIT License. See `LICENSE`.
+MIT.
