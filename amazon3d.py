@@ -2,8 +2,8 @@
 """
 Amazon3DDownload
 
-Downloads Amazon "View in 3D" model packages and can convert them to OBJ
-for use in other 3D software.
+Downloads Amazon "View in 3D" model packages and converts them to OBJ
+and STL for use in other 3D software.
 
 Initial version written with assistance from OpenAI ChatGPT.
 """
@@ -156,28 +156,154 @@ def extract_package(package, destination):
     return models[0]
 
 
-def convert_to_obj(gltf_path, obj_dir):
+def decompress_draco(gltf_path):
+    """Amazon models use KHR_draco_mesh_compression, which trimesh cannot
+    read (it silently loads every vertex as 0,0,0). Decode the Draco blob
+    and write an uncompressed copy of the glTF next to the original."""
+    gltf = json.loads(gltf_path.read_text(encoding="utf-8"))
+
+    extensions = set(gltf.get("extensionsRequired", [])) | set(
+        gltf.get("extensionsUsed", [])
+    )
+    if "KHR_draco_mesh_compression" not in extensions:
+        return gltf_path
+
+    try:
+        import DracoPy
+        import numpy as np
+    except ImportError:
+        raise ValueError(
+            "This model is Draco-compressed. Run: pip install -r requirements.txt"
+        )
+
+    print("Decompressing Draco geometry...")
+
+    source_buffers = [
+        (gltf_path.parent / buf["uri"]).read_bytes() for buf in gltf["buffers"]
+    ]
+
+    decoded_bin = bytearray()
+    new_buffer_index = len(gltf["buffers"])
+    buffer_views = gltf.setdefault("bufferViews", [])
+    accessors = gltf["accessors"]
+
+    def add_view(data):
+        while len(decoded_bin) % 4:
+            decoded_bin.append(0)
+        buffer_views.append(
+            {
+                "buffer": new_buffer_index,
+                "byteOffset": len(decoded_bin),
+                "byteLength": len(data),
+            }
+        )
+        decoded_bin.extend(data)
+        return len(buffer_views) - 1
+
+    def decoded_attribute(mesh, name):
+        if name == "POSITION":
+            return mesh.points
+        if name == "NORMAL":
+            return getattr(mesh, "normals", None)
+        if name.startswith("TEXCOORD"):
+            return getattr(mesh, "tex_coord", None)
+        if name.startswith("COLOR"):
+            return getattr(mesh, "colors", None)
+        return None
+
+    for mesh in gltf.get("meshes", []):
+        for primitive in mesh.get("primitives", []):
+            draco = primitive.get("extensions", {}).pop(
+                "KHR_draco_mesh_compression", None
+            )
+            if draco is None:
+                continue
+
+            view = buffer_views[draco["bufferView"]]
+            offset = view.get("byteOffset", 0)
+            blob = source_buffers[view["buffer"]][
+                offset : offset + view["byteLength"]
+            ]
+            decoded = DracoPy.decode(blob)
+
+            faces = np.asarray(decoded.faces, dtype=np.uint32)
+            accessors[primitive["indices"]].update(
+                {
+                    "bufferView": add_view(faces.tobytes()),
+                    "byteOffset": 0,
+                    "componentType": 5125,
+                    "count": int(faces.size),
+                    "type": "SCALAR",
+                }
+            )
+
+            for name, accessor_index in primitive["attributes"].items():
+                array = decoded_attribute(decoded, name)
+                if array is None or len(array) == 0:
+                    continue
+                array = np.asarray(array, dtype=np.float32)
+                accessor = accessors[accessor_index]
+                accessor.update(
+                    {
+                        "bufferView": add_view(array.tobytes()),
+                        "byteOffset": 0,
+                        "componentType": 5126,
+                        "count": int(len(array)),
+                    }
+                )
+                if name == "POSITION":
+                    accessor["min"] = array.min(axis=0).tolist()
+                    accessor["max"] = array.max(axis=0).tolist()
+
+            if not primitive.get("extensions"):
+                primitive.pop("extensions", None)
+
+    bin_path = gltf_path.with_name(gltf_path.stem + "_decoded.bin")
+    bin_path.write_bytes(decoded_bin)
+    gltf["buffers"].append(
+        {"uri": bin_path.name, "byteLength": len(decoded_bin)}
+    )
+
+    for key in ("extensionsUsed", "extensionsRequired"):
+        if key in gltf:
+            gltf[key] = [
+                e for e in gltf[key] if e != "KHR_draco_mesh_compression"
+            ]
+            if not gltf[key]:
+                del gltf[key]
+
+    decoded_path = gltf_path.with_name(gltf_path.stem + "_decoded.gltf")
+    decoded_path.write_text(json.dumps(gltf), encoding="utf-8")
+
+    return decoded_path
+
+
+def convert_model(gltf_path, product_dir):
     try:
         import trimesh
     except ImportError:
         raise ValueError(
-            "OBJ conversion needs trimesh. Run: pip install -r requirements.txt"
+            "Conversion needs trimesh. Run: pip install -r requirements.txt"
         )
 
-    obj_dir.mkdir(parents=True, exist_ok=True)
+    name = gltf_path.stem
+    gltf_path = decompress_draco(gltf_path)
 
     print("Loading glTF...")
     scene = trimesh.load(gltf_path, force="scene")
 
-    obj_path = obj_dir / (gltf_path.stem + ".obj")
+    outputs = []
+    for suffix in (".obj", ".stl"):
+        out_dir = product_dir / suffix[1:]
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / (name + suffix)
+        print(f"Exporting {suffix[1:].upper()}...")
+        scene.export(out_path)
+        if not out_path.exists():
+            raise ValueError(f"{suffix[1:].upper()} export failed.")
+        outputs.append(out_path)
 
-    print("Exporting OBJ...")
-    scene.export(obj_path)
-
-    if not obj_path.exists():
-        raise ValueError("OBJ export failed.")
-
-    return obj_path
+    return outputs
 
 
 def main():
@@ -186,9 +312,9 @@ def main():
     )
     parser.add_argument("product", help="Amazon URL, a.co URL, or ASIN")
     parser.add_argument(
-        "--obj",
+        "--no-convert",
         action="store_true",
-        help="Also convert the downloaded model to OBJ",
+        help="Only download; skip OBJ/STL conversion",
     )
     parser.add_argument(
         "-o",
@@ -247,13 +373,13 @@ def main():
 
         print(f"Saved: {package}")
 
-        if args.obj:
+        if not args.no_convert:
             print("Extracting model...")
             gltf = extract_package(package, product_dir / "extracted")
             print(f"Found: {gltf}")
 
-            obj = convert_to_obj(gltf, product_dir / "obj")
-            print(f"OBJ ready: {obj}")
+            for path in convert_model(gltf, product_dir):
+                print(f"Ready: {path}")
 
         return 0
 

@@ -2,7 +2,7 @@
 
 Small Python script for downloading 3D furniture models from Amazon products that expose **View in 3D** in the Amazon mobile app.
 
-It can optionally convert the downloaded model to **OBJ** for use in other 3D software.
+Downloaded models are automatically converted to **OBJ** and **STL** for use in other 3D software.
 
 ## Install
 
@@ -24,10 +24,10 @@ Or an ASIN:
 python amazon3d.py B0CMZP2MNF
 ```
 
-## Convert to OBJ
+To download only, without OBJ/STL conversion:
 
 ```bash
-python amazon3d.py "https://a.co/d/041LnFSr" --obj
+python amazon3d.py "https://a.co/d/041LnFSr" --no-convert
 ```
 
 Output is placed under:
@@ -37,15 +37,17 @@ downloads/
 └── B0CMZP2MNF/
     ├── 91tIB8dOoML.zip
     ├── extracted/
-    └── obj/
-        ├── B0CMZP2MNF.obj
-        ├── material.mtl
-        └── texture files
+    ├── obj/
+    │   ├── B0CMZP2MNF.obj
+    │   ├── material.mtl
+    │   └── texture files
+    └── stl/
+        └── B0CMZP2MNF.stl
 ```
 
 ## Why trimesh?
 
-Some Amazon models use `KHR_draco_mesh_compression` (Draco-compressed glTF geometry). The OBJ conversion uses `trimesh` rather than a hand-written glTF parser so those models can be decoded and exported correctly.
+Some Amazon models use `KHR_draco_mesh_compression` (Draco-compressed glTF geometry). The conversion uses `trimesh` plus `DracoPy` so those models can be decoded and exported correctly.
 
 ## Notes
 
